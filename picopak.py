@@ -1,29 +1,31 @@
 #!/usr/bin/env python
 #
-# Goal: package like backup management, not full
+# TODO: multiple package add from paths in source not packaged
+# TODO: verify and synchronize
 #
-# Usage
-# - initialize it on localhost. Default localhost is .picopak
-#   picopak init <path?>
-# - add external source
-#   picopak source add <path>
-# - add packages
+#
+# Goal: package like backup management, not full
 # 
 # File structure (toplevel)
 # data/
-#   .picopak-source contains UUID of source
-#   packagename/
-#       .picopak    contains UUID of package
+#   source.yaml (uuid of source key <> sources.yaml)
+#   packagename (unique)/
+#       .picopak    contains UUID of package (for check against renames)
 # meta/
 #   .git
 #   sources.yaml
 #   paks/
-#       package.yaml == most up to date
-#       sources/
-#           sourceuuid.yaml == details of version for source
+#       <pakname>/
+#           package.yaml == most up to date
+#           sources/
+#               <source>.yaml == details of version for source
 #   sources/
-#       sourceuuid.yaml == list of packages
+#       <source>.yaml == list of packages
 #       
+# meta/paks/<pakname>/sources/<source>.yaml 
+#   is motivated by synchronization easiness, contains details
+# meta/sources/<source>.yaml 
+#   just list of packages (rebuilt from files)
 import argparse
 import datetime
 import yaml
@@ -56,59 +58,98 @@ def get_volume_name_uuid(path):
 class Config:
     def __init__(self,meta="",data=""):
         """initializes separately metadata (repo) and data (source)"""
+        self.remote = "https://bitbucket.org/eruffaldi/picopak_store"
         self.meta = os.path.abspath(meta)
         self.data = os.path.abspath(data)
         self.name = "here"
         self.solveuuid()
-    def getthissourcefile(self):
+    def source_marker_path(self):
         """sourc file name"""
         return os.path.join(self.data,"source.yaml")
     def solveuuid(self):
         """solves source uuid file"""
-        if not os.path.isfile(self.getthissourcefile()):
+        if not os.path.isfile(self.source_marker_path()):
             self.uuid = None
             return None
         else:
-            self.uuid = open(self.getthissourcefile(),"rb").read().strip()
+            self.uuid = open(self.source_marker_path(),"rb").read().strip()
             return self.uuid
-    def getpacksmetadir(self):
+    def meta_paks_path(self):
         """folder containing package data"""
         return os.path.join(self.meta,"paks")
-    def getsourcesfile(self):
+    def meta_sources_list_path(self):
         """file containing source listing"""
         return os.path.join(self.meta,"sources.yaml")
-    def getpackdatadir(self,name):
+    def source_pak_path(self,name):
         """content folder of given package in the source"""
         return os.path.join(self.data,name)
-    def getpackmetadir(self,name):
+    def meta_pak_path(self,name):
         """metadata folder of given package in meta"""
         return os.path.join(self.meta,"paks",name)
-    def getpacksourcesdir(self,name):
+    def meta_pak_sources_path(self,name):
         """general detaisl"""
         return os.path.join(self.meta,name,"sources")
-    def getsourcefile(self,source):
+    def meta_source_path(self,source):
         """details about source in metadata"""
         return os.path.join(self.meta,"sources",source + ".yaml")
-    def getpacksourcefile(self,name,source):
+    def meta_source_load(self,source):
+        fp = self.meta_source_path(source)
+        if not os.path.isfile(fp):
+            return dict()
+        else:
+            return yaml.load(open(fp,"rb"))
+    def meta_pak_source_path(self,name,source):
         """source in pack"""
         return os.path.join(self.meta,name,"sources",source + ".yaml")
-    def listpacksources(self,name,load=False):
-        """all packages of a given source"""
-        fp = self.getpacksourcesdir(name)
-        z = [os.path.join(fp,x) for x in os.listdir(fp) if x.endswith(".yaml")]
-        if load:
-            z = [yaml.load(open(x,"rb")) for x in z]
-            return dict([(x["uuid"],x) for x in z])
+    def loadsources(self):
+        fp = self.meta_sources_list_path()
+        if os.path.isfile(fp) == 0:
+            return None
         else:
-            return z
-    def listmetapacks(self):
+            with open(fp) as w:
+                s = yaml.load(w)
+                if s is None:
+                    return dict()
+                else:
+                    return dict([(uuid,Source(uuid).fromdict(x)) for uuid,x in s.iteritems()])
+    def solvesource(self,ss,req):
+        # self
+        if req == "" or req == "this":
+            return Source(self.uuid).fromdict(dict(path=self.data,name="here"))
+        else:
+            # by uuid
+            s = ss.get(req)
+            if s is not None:
+                return s
+            # or by name
+            for s in ss.values():
+                if s.name == req:
+                    return s
+            return None
+
+    def meta_pak_sources_list(self,name,load=False):
+        """all packages of a given source"""
+        fp = self.meta_pak_sources_path(name)        
+        if load:
+            if not os.path.isdir(fp):
+                return dict()
+            else:
+                z = [yaml.load(open(os.path.join(fp,x))) for x in os.listdir(fp) if x.endswith(".yaml")]
+                return dict([(x["uuid"],x) for x in z])
+        else:
+            if not os.path.isdir(fp):
+                return []
+            else:
+                return [os.path.splitext(x)[0] for x in os.listdir(fp) if x.endswith(".yaml")]
+    def meta_list_paks(self):
         """list packages"""
-        fp = os.path.join(self.meta,"paks")
+        fp = self.meta_paks_path()
         return [x for x in os.listdir(fp) if x[0] != "." and os.path.isdir(os.path.join(fp,x))]
-    def listdatapacks(self):
+    def source_list_paks(self):
         """list source pckages"""
         fp = self.data
         return [x for x in os.listdir(fp) if os.path.isfile(os.path.join(fp,x,".picopak"))]
+
     def add(self,files):
         """Add file or files to repo"""
         print "adding ",files," to ",self.meta
@@ -145,24 +186,13 @@ class Source:
         self.content.update(dict(name=self.name,path=self.path,label=self.label))
         return self.content
     
-def loadsources(cfg):
-    fp = cfg.getsourcesfile()
-    if os.path.isfile(fp) == 0:
-        return None
-    else:
-        with open(fp) as w:
-            s = yaml.load(w)
-            if s is None:
-                return dict()
-            else:
-                return dict([(uuid,Source(uuid).fromdict(x)) for uuid,x in s.iteritems()])
 
 def package_add(cfg,packname):
-    pmetadir = cfg.getpackmetadir(packname)
+    pmetadir = cfg.meta_pak_path(packname)
     pmetadir_sig = os.path.join(pmetadir,"package.yml")
     pmetadir_sources = os.path.join(pmetadir,"sources")
 
-    pdatadir = cfg.getpackdatadir(packname)
+    pdatadir = cfg.source_pak_path(packname)
     pdatadir_sig = os.path.join(pdatadir,".picopak")
     
     if os.path.isdir(pmetadir):
@@ -189,18 +219,18 @@ def package_add(cfg,packname):
 
     # then add cfg.uuid as source
     x = dict(source=cfg.uuid,name=packname,lasttime=datetime.datetime.now().isoformat())
-    psf = cfg.getpacksourcefile(packname,cfg.uuid)
+    psf = cfg.meta_pak_source_path(packname,cfg.uuid)
     yaml.dump(x,open(psf,"wb"))
     cfg.add(pmetadir_sig)
     cfg.commit("added source " + cfg.uuid + " to package " + packname)
 
 def _update_one_source_dict(cfg,uuid,su,msg="update source"):
     # add to sources.yaml
-    ss = yaml.load(open(cfg.getsourcesfile(),"rb"))
+    ss = yaml.load(open(cfg.meta_sources_list_path(),"rb"))
     if ss is None:
         ss = dict()
     ss[uuid] = su
-    yaml.dump(ss,open(cfg.getsourcesfile(),"wb"))
+    yaml.dump(ss,open(cfg.meta_sources_list_path(),"wb"))
     # create source.yaml
     cfg.add("sources.yaml")
     cfg.commit(msg)
@@ -209,27 +239,14 @@ def addsource(cfg,path,uuid,name):
     uuid = str(uuid)
     volname,voluuid = get_volume_name_uuid(path)
 
-    if not os.path.isfile(cfg.getthissourcefile()):
-        print "making source file",cfg.getthissourcefile()
-        open(cfg.getthissourcefile(),"wb").write(uuid)    
+    if not os.path.isfile(cfg.source_marker_path()):
+        print "making source file",cfg.source_marker_path()
+        open(cfg.source_marker_path(),"wb").write(uuid)    
     su = dict(name=name,path=path,volume_uuid=voluuid,volume_name=volname)
     _update_one_source_dict(cfg,uuid,su,"added source " + uuid +" to " + path)
 
 
-def solvesource(cfg,ss,req):
-    # self
-    if req == "" or req == "this":
-        return Source(cfg.uuid).fromdict(dict(path=cfg.data,name="here"))
-    else:
-        # by uuid
-        s = ss.get(req)
-        if s is not None:
-            return s
-        # or by name
-        for s in ss:
-            if s["name"] == req:
-                return s
-        return None
+
 
 def verify_source(acfg,s):
     print "source verification",acfg.data,"with repo",acfg.meta,"uuid",s.uuid
@@ -256,7 +273,7 @@ def verify_source(acfg,s):
     # 3- listed but not in data => remove
     # 4- both => need check
     indataset = set(indata.keys())
-    allpacks = set(acfg.listmetapacks())
+    allpacks = set(acfg.meta_list_paks())
     unknownpacks = allpacks-indataset
     # Case 1
     for u in unknownpacks:
@@ -268,7 +285,7 @@ def verify_source(acfg,s):
 
     for x in indata:
         pass
-    #    sources = acfg.listpacksources(x,load=True)
+    #    sources = acfg.meta_pak_sources_list(x,load=True)
     #    if not s.uuid in sources:
     #        print "need to add",x,"to",s.uuid
 def process_source(args,cfg,ss):
@@ -276,7 +293,7 @@ def process_source(args,cfg,ss):
         # list known sources as of meta
         print "\n".join(["%s\t%s\t%s" % (s.name,s.uuid,s.path) for s in ss.values()])
     elif args.subparser2_name == "rename":
-        s = solvesource(cfg,ss,args.uuid)
+        s = cfg.solvesource(ss,args.uuid)
         if s is None:
             print "unknown source",args.uuid
         else:
@@ -285,14 +302,13 @@ def process_source(args,cfg,ss):
                 _update_one_source_dict(cfg,s.uuid,s.todict())
                 cfg.push()
     elif args.subparser2_name == "show":
-        print "UNTESTED"
         # for given source show details
-        s = solvesource(cfg,ss,args.name)
+        s = cfg.solvesource(ss,args.name)
         if s is None:
-            print "unknown source"
+            print "unknown source",args.name
         else:
-            indata = set(acfg.listdatapacks())
-            print "\n".join(indata)
+            so = cfg.meta_source_load(s.uuid)
+            print so
     elif args.subparser2_name == "add":
         # args.path EXIST
         # args.path CONTAINS source.yaml
@@ -314,10 +330,10 @@ def process_source(args,cfg,ss):
                 print "adding unknown source",cfg.data,"as",cfg.uuid
                 addsource(acfg,acfg.data,acfg.uuid,args.name)
     elif args.subparser2_name == "verify":
-        print "UNCOMPLETED"
+        print "UNCOMPLETED - make multiple sources"
         # sourcename/id => source object
         # verify objects
-        s = solvesource(cfg,ss,args.name)
+        s = cfg.solvesource(ss,args.name)
         if s is None:
             print "unknown source",args.name
         # verify uuid
@@ -328,40 +344,37 @@ def process_source(args,cfg,ss):
                 return
         else:
             acfg = cfg
-        verifysource(acfg,s)
+        verify_source(acfg,s)
 
 def process_pack(args,cfg,ss):
     if args.subparser2_name == "list":
-        print "\n".join(cfg.listmetapacks())
+        print "\n".join(cfg.meta_list_paks())
     elif args.subparser2_name == "add":
         package_add(cfg,args.name)
     elif args.subparser2_name == "sources":
-        packname = args.name
-        print "NOT IMPLEMENTED"
-        # check existent pack
-        # check sources         
-    elif args.subparser2_name == "sync":
-        print "NOT IMPLEMENTED"
+        print "\n".join(cfg.meta_pak_sources_list(args.name,load=False))
     
 def main():
     argparser = argparse.ArgumentParser(prog="picpak my backup management")  
     subparsers = argparser.add_subparsers(help='sub-command help', dest='subparser_name')
     argparser.add_argument("--root",default="~/.picopak")
 
+    # Init Command
     parser_init = subparsers.add_parser('init', help = "initializs a picopak repository")
     parser_init.add_argument("path",default="",help="default is in ~/.picopak")
     parser_init.add_argument("--meta-only",dest="metaonly",action="store_true",help="is not creating a source")
     parser_init.add_argument("--name",dest="name",help="when this is not a meta-only this is the optional name of the source",default="")
 
-
+    # Sync Command
     parser_sync = subparsers.add_parser('sync', help = "source help")
 
+    # Source Commands
     parser_source = subparsers.add_parser('source', help = "source help")
     subparsers_source = parser_source.add_subparsers(help="sub-sub-command help",dest='subparser2_name')
     parser_source_add = subparsers_source.add_parser('add', help='adds')
     parser_source_list = subparsers_source.add_parser('list', help='list')
     parser_source_rename = subparsers_source.add_parser('rename', help='rename')
-    parser_source_content = subparsers_source.add_parser('show', help='show content')
+    parser_source_show = subparsers_source.add_parser('show', help='show content')
     parser_source_verify = subparsers_source.add_parser('verify', help='content')
 
     parser_source_add.add_argument("path")
@@ -369,19 +382,23 @@ def main():
     parser_source_rename.add_argument("uuid")
     parser_source_rename.add_argument("name")
     parser_source_verify.add_argument("name",default="this")
-
+    parser_source_show.add_argument("name")
+    # Pack Commands
     parser_pack = subparsers.add_parser('pack', help = "pack help")
     subparsers_pack = parser_pack.add_subparsers(help="sub-sub-command help",dest='subparser2_name')
     parser_pack_list = subparsers_pack.add_parser('list', help='adds')
     parser_pack_add = subparsers_pack.add_parser('add', help='adds')
+    parser_pack_sources = subparsers_pack.add_parser('sources', help='list pak sources')
     parser_pack_add.add_argument("name")
+    parser_pack_sources.add_argument("name")
 
+    # Go!
     args = argparser.parse_args()
     args.root = expanduser(args.root)
 
     if args.subparser_name != "init":
         cfg = Config(os.path.join(args.root,"meta"),os.path.join(args.root,"data"))
-        ss = loadsources(cfg)
+        ss = cfg.loadsources()
         if False: # not needed
             if not cfg.solveuuid():
                 print "missing source.yaml, use init or source add"
@@ -392,7 +409,7 @@ def main():
             if False:
                 cfg.uuid = str(uuid.uuid4())
                 addsource(cfg,cfg.data,cfg.uuid,"")
-                open(cfg.getthissourcefile(),"wb").write(cfg.uuid)
+                open(cfg.source_marker_path(),"wb").write(cfg.uuid)
                 if ss is None:
                     print "missing sources, not valid folder"
                     return
@@ -402,9 +419,9 @@ def main():
             cfg = Config(os.path.join(args.path,"meta"),os.path.join(args.path,"data"))
             print "initing",args.path
             os.makedirs(cfg.meta)
-            os.makedirs(cfg.getpacksmetadir())
+            os.makedirs(cfg.meta_paks_path())
             os.system("cd %s; git init" % cfg.meta)
-            os.system("cd %s; git remote add origin https://bitbucket.org/eruffaldi/picopak_store" % cfg.meta)
+            os.system("cd %s; git remote add origin %s" % (cfg.meta,cfg.remote))
             cfg.pull()
             if not args.metaonly:
                 print "adding data folder",cfg.data
@@ -421,10 +438,10 @@ def main():
         cfg.pull()
         cfg.push()
         # then check for attached sources
-        ss = loadsources(cfg)
+        ss = cfg.loadsources()
         for s in ss.values():
             if not os.path.isdir(s.path):
-                print s.uuid,s.path,"not available"
+                print "source",s.uuid,s.path,"not available"
                 continue                
             # verify presence of uuid
             acfg = Config(cfg.meta,s.path)
@@ -434,6 +451,7 @@ def main():
                 continue
             # then verify the content
             verify_source(acfg,s)
+        # push changes
         cfg.push()
 
 
