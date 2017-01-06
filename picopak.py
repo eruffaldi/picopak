@@ -58,14 +58,15 @@ class Config:
         """initializes separately metadata (repo) and data (source)"""
         self.meta = os.path.abspath(meta)
         self.data = os.path.abspath(data)
-        self.uuid = self.solveuuid()
         self.name = "here"
+        self.solveuuid()
     def getthissourcefile(self):
         """sourc file name"""
         return os.path.join(self.data,"source.yaml")
     def solveuuid(self):
         """solves source uuid file"""
         if not os.path.isfile(self.getthissourcefile()):
+            self.uuid = None
             return None
         else:
             self.uuid = open(self.getthissourcefile(),"rb").read().strip()
@@ -193,24 +194,27 @@ def package_add(cfg,packname):
     cfg.add(pmetadir_sig)
     cfg.commit("added source " + cfg.uuid + " to package " + packname)
 
+def _update_one_source_dict(cfg,uuid,su,msg="update source"):
+    # add to sources.yaml
+    ss = yaml.load(open(cfg.getsourcesfile(),"rb"))
+    if ss is None:
+        ss = dict()
+    ss[uuid] = su
+    yaml.dump(ss,open(cfg.getsourcesfile(),"wb"))
+    # create source.yaml
+    cfg.add("sources.yaml")
+    cfg.commit(msg)
+
 def addsource(cfg,path,uuid,name):
     uuid = str(uuid)
     volname,voluuid = get_volume_name_uuid(path)
 
     if not os.path.isfile(cfg.getthissourcefile()):
-        open(cfg.getthissourcefile(),"wb").write(uuid)
-    # add to sources.yaml
-    ss = yaml.load(open(cfg.getsourcesfile(),"rb"))
-    if ss is None:
-        ss = dict()
+        print "making source file",cfg.getthissourcefile()
+        open(cfg.getthissourcefile(),"wb").write(uuid)    
     su = dict(name=name,path=path,volume_uuid=voluuid,volume_name=volname)
-    ss[uuid] = su
-    yaml.dump(ss,open(cfg.getsourcesfile(),"wb"))
+    _update_one_source_dict(cfg,uuid,su,"added source " + uuid +" to " + path)
 
-    # create source.yaml
-    print "adding ",path,"to sources.yaml"
-    cfg.add("sources.yaml")
-    cfg.commit("added source " + uuid +" to " + path)
 
 def solvesource(cfg,ss,req):
     # self
@@ -256,7 +260,7 @@ def verify_source(acfg,s):
     unknownpacks = allpacks-indataset
     # Case 1
     for u in unknownpacks:
-        package_add(cfg,indata[u])
+        pass #package_add(acfg,indata[u])
 
     print "Need to deal with cases 2..4"
     for u in (indataset-unknownpacks):
@@ -271,7 +275,17 @@ def process_source(args,cfg,ss):
     if args.subparser2_name == "list":
         # list known sources as of meta
         print "\n".join(["%s\t%s\t%s" % (s.name,s.uuid,s.path) for s in ss.values()])
+    elif args.subparser2_name == "rename":
+        s = solvesource(cfg,ss,args.uuid)
+        if s is None:
+            print "unknown source",args.uuid
+        else:
+            if s.name != args.name:
+                s.name = args.name
+                _update_one_source_dict(cfg,s.uuid,s.todict())
+                cfg.push()
     elif args.subparser2_name == "show":
+        print "UNTESTED"
         # for given source show details
         s = solvesource(cfg,ss,args.name)
         if s is None:
@@ -280,23 +294,27 @@ def process_source(args,cfg,ss):
             indata = set(acfg.listdatapacks())
             print "\n".join(indata)
     elif args.subparser2_name == "add":
-        # args.data EXIST
-        # args.data CONTAINS source.yaml
-        # args.data source.yaml uuid in list
-        acfg = Config(cfg.meta,args.data)
+        # args.path EXIST
+        # args.path CONTAINS source.yaml
+        # args.path source.yaml uuid in list
+        acfg = Config(cfg.meta,args.path)
         if not os.path.isdir(cfg.data):
-            print "missing path",cfg.data
-        elif not acfg.solveuuid():
-            addsource(cfg,cfg.data,uuid=uuid.uuid4())
+            print "unknown path",args.path
+        elif not acfg.uuid:
+            puuid = str(uuid.uuid4())
+            print "creating source at folder",cfg.data,"as",puuid
+            addsource(acfg,acfg.data,puuid,args.name)
             if not acfg.solveuuid():
-                print "failed source creation"
+                print "!!failed source creation"
         else:
             s = ss.get(acfg.uuid)
             if s:
-                print "known source, pointing to",s.path
+                print "source is known"
             else:
-                addsource(cfg,args.data,acfg.uuid,args.name)
+                print "adding unknown source",cfg.data,"as",cfg.uuid
+                addsource(acfg,acfg.data,acfg.uuid,args.name)
     elif args.subparser2_name == "verify":
+        print "UNCOMPLETED"
         # sourcename/id => source object
         # verify objects
         s = solvesource(cfg,ss,args.name)
@@ -333,6 +351,7 @@ def main():
     parser_init = subparsers.add_parser('init', help = "initializs a picopak repository")
     parser_init.add_argument("path",default="",help="default is in ~/.picopak")
     parser_init.add_argument("--meta-only",dest="metaonly",action="store_true",help="is not creating a source")
+    parser_init.add_argument("--name",dest="name",help="when this is not a meta-only this is the optional name of the source",default="")
 
 
     parser_sync = subparsers.add_parser('sync', help = "source help")
@@ -341,11 +360,14 @@ def main():
     subparsers_source = parser_source.add_subparsers(help="sub-sub-command help",dest='subparser2_name')
     parser_source_add = subparsers_source.add_parser('add', help='adds')
     parser_source_list = subparsers_source.add_parser('list', help='list')
+    parser_source_rename = subparsers_source.add_parser('rename', help='rename')
     parser_source_content = subparsers_source.add_parser('show', help='show content')
     parser_source_verify = subparsers_source.add_parser('verify', help='content')
 
     parser_source_add.add_argument("path")
     parser_source_add.add_argument("name")
+    parser_source_rename.add_argument("uuid")
+    parser_source_rename.add_argument("name")
     parser_source_verify.add_argument("name",default="this")
 
     parser_pack = subparsers.add_parser('pack', help = "pack help")
@@ -387,7 +409,7 @@ def main():
             if not args.metaonly:
                 print "adding data folder",cfg.data
                 os.makedirs(cfg.data)
-                addsource(cfg,cfg.data,uuid.uuid4(),"")
+                addsource(cfg,cfg.data,uuid.uuid4(),args.name)
                 cfg.push()
         else:
             print "already existing",args.path
