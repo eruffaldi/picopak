@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 #
-# TODO: multiple package add from paths in source not packaged
-# TODO: verify and synchronize
+# TODO: remove source or package
+# TODO: packages with not enough recent sources
+# TODO: some caching
+# TODO: verify packname-uuid correspondence
 #
 #
 # Goal: package like backup management, not full
@@ -33,7 +35,8 @@ import os
 import uuid
 import subprocess
 from os.path import expanduser
-
+import coloredlogs, logging
+coloredlogs.install()
 # TODO crossplatform
 # TODO given path extract volume then label+uuid+diskformat
 #
@@ -80,6 +83,9 @@ class Config:
     def meta_sources_list_path(self):
         """file containing source listing"""
         return os.path.join(self.meta,"sources.yaml")
+    def meta_sources_path(self):
+        """file containing source listing"""
+        return os.path.join(self.meta,"sources")
     def source_pak_path(self,name):
         """content folder of given package in the source"""
         return os.path.join(self.data,name)
@@ -88,7 +94,7 @@ class Config:
         return os.path.join(self.meta,"paks",name)
     def meta_pak_sources_path(self,name):
         """general detaisl"""
-        return os.path.join(self.meta,name,"sources")
+        return os.path.join(self.meta_pak_path(name),"sources")
     def meta_source_path(self,source):
         """details about source in metadata"""
         return os.path.join(self.meta,"sources",source + ".yaml")
@@ -98,9 +104,9 @@ class Config:
             return dict()
         else:
             return yaml.load(open(fp,"rb"))
-    def meta_pak_source_path(self,name,source):
+    def meta_pak_source_path(self,name,source_uuid):
         """source in pack"""
-        return os.path.join(self.meta,name,"sources",source + ".yaml")
+        return os.path.join(self.meta_pak_sources_path(name),source_uuid + ".yaml")
     def loadsources(self):
         fp = self.meta_sources_list_path()
         if os.path.isfile(fp) == 0:
@@ -130,6 +136,7 @@ class Config:
     def meta_pak_sources_list(self,name,load=False):
         """all packages of a given source"""
         fp = self.meta_pak_sources_path(name)        
+
         if load:
             if not os.path.isdir(fp):
                 return dict()
@@ -146,28 +153,64 @@ class Config:
         fp = self.meta_paks_path()
         return [x for x in os.listdir(fp) if x[0] != "." and os.path.isdir(os.path.join(fp,x))]
     def source_list_paks(self):
-        """list source pckages"""
-        fp = self.data
-        return [x for x in os.listdir(fp) if os.path.isfile(os.path.join(fp,x,".picopak"))]
+        """list source packages"""
+        r = []
+        for x in os.listdir(self.data):
+            fp = os.path.join(self.data,x)
+            if os.path.isdir(fp):
+                fpp = os.path.join(fp,".picopak")
+                if os.path.isfile(fpp):                    
+                    q = open(fpp,"rb").read().strip()
+                    r.append((x,q))
+                else:
+                    r.append((x,None))
+        return r
 
-    def add(self,files):
+    def git_clean(self):
+        return os.system("cd %s; git clean -f" % (self.meta)) 
+
+    def git_reset(self):
+        return os.system("cd %s; git reset --hard" % (self.meta)) 
+
+    def git_add(self,files):
         """Add file or files to repo"""
-        print "adding ",files," to ",self.meta
+        print "git_add ",files," to ",self.meta
         if type(files) is str:
             return os.system("cd %s; git add %s" % (self.meta,files)) 
         else:
             return os.system("cd %s; git add %s" % (self.meta," ".join(files))) 
-    def commit(self,msg="auto"):
+    def git_commit(self,msg="auto"):
         """Commit to repo"""
         print "committing to ",self.meta
         return os.system("cd %s; git commit -am \"%s\"" % (self.meta,msg))      
-    def pull(self):
+    def git_pull(self):
         """Pull from repo"""
         #--work-tree=%s --git-dir=%s/.git 
         return os.system("cd %s; git pull origin master" % self.meta)
-    def push(self):
+    def git_push(self):
         """Push to repo"""
         return os.system("cd %s; git push --set-upstream origin master" % self.meta)
+
+class SourcePak:
+    def __init__(self):
+        self.content = {}
+    def create(self,uuid,pak,time):
+        self.uuid = uuid
+        self.pak = pak
+        self.firsttime = time
+        self.lasttime = time
+    def fromdict(self,d):
+        self.content.update(d)
+        self.uuid = d["uuid"]
+        self.pak = d["pak"]
+        self.firsttime = d["firsttime"]
+        self.lasttime = d["lasttime"]
+    def todict(self):
+        self.content["uuid"] = self.uuid
+        self.content["pak"] = self.pak
+        self.content["firsttime"] = self.firsttime
+        self.content["lasttime"] = self.lasttime
+        return self.content
 
 class Source:
     def __init__(self,u=""):
@@ -186,8 +229,12 @@ class Source:
         self.content.update(dict(name=self.name,path=self.path,label=self.label))
         return self.content
     
-
-def package_add(cfg,packname):
+def openmkdir(fp):
+    q = os.path.split(fp)[0]
+    if not os.path.isdir(q):
+        os.makedirs(q)
+    return open(fp,"wb")
+def package_add(cfg,packname,now):
     pmetadir = cfg.meta_pak_path(packname)
     pmetadir_sig = os.path.join(pmetadir,"package.yml")
     pmetadir_sources = os.path.join(pmetadir,"sources")
@@ -214,15 +261,17 @@ def package_add(cfg,packname):
     os.makedirs(pmetadir_sources)
     x = dict(name=packname,uuid=puuid)
     yaml.dump(x,open(pmetadir_sig,"wb"))
-    cfg.add(pmetadir_sig)
-    cfg.commit("added " + packname)
+    cfg.git_add(pmetadir_sig)
+    cfg.git_commit("added " + packname)
 
     # then add cfg.uuid as source
-    x = dict(source=cfg.uuid,name=packname,lasttime=datetime.datetime.now().isoformat())
+    sp = SourcePak()
+    sp.create(uuid=cfg.uuid,pak=packname,time=now)
+
     psf = cfg.meta_pak_source_path(packname,cfg.uuid)
-    yaml.dump(x,open(psf,"wb"))
-    cfg.add(pmetadir_sig)
-    cfg.commit("added source " + cfg.uuid + " to package " + packname)
+    yaml.dump(sp.todict(),openmkdir(psf))
+    cfg.git_add(pmetadir_sig)
+    cfg.git_commit("added source " + cfg.uuid + " to package " + packname)
 
 def _update_one_source_dict(cfg,uuid,su,msg="update source"):
     # add to sources.yaml
@@ -232,8 +281,8 @@ def _update_one_source_dict(cfg,uuid,su,msg="update source"):
     ss[uuid] = su
     yaml.dump(ss,open(cfg.meta_sources_list_path(),"wb"))
     # create source.yaml
-    cfg.add("sources.yaml")
-    cfg.commit(msg)
+    cfg.git_add("sources.yaml")
+    cfg.git_commit(msg)
 
 def addsource(cfg,path,uuid,name):
     uuid = str(uuid)
@@ -246,48 +295,73 @@ def addsource(cfg,path,uuid,name):
     _update_one_source_dict(cfg,uuid,su,"added source " + uuid +" to " + path)
 
 
+def splitsets3(A,B):
+    # return only A,common,only 
+    common = A & B
+    return A-common,common,B-common
 
 
-def verify_source(acfg,s):
-    print "source verification",acfg.data,"with repo",acfg.meta,"uuid",s.uuid
-
+def verify_source(cfg,s):
+    logging.info("source verification %s with repo %s uuid %s" % (cfg.data,cfg.meta,s.uuid))
+    now = datetime.datetime.now().isoformat()
+    
     # scan folders for new pakcages
     # remove missing ones
     # MAYBE check changed
-    indata = dict()
-    for x in os.listdir(acfg.data):
-        fp = os.path.join(acfg.data,x)
-        if x[0] != "." and os.path.isdir(fp):
-            fpp = os.path.join(fp,".picopak")
-            if not os.path.isfile(fpp):
-                print "\tignoring folder",x,"missing",fpp
-                continue
-            # file contains UUID
-            uuid = open(fpp,"rb").read().strip()
-            indata[uuid] = x
-    print "\tfound:",",".join(["%s" % x for x in indata.keys()])
+    source_paks = dict()
+    for pathname,picocontent in cfg.source_list_paks():
+        if picocontent != "":
+            source_paks[pathname] = dict(uuid=uuid,name=pathname)
+        else:
+            source_paks[pathname] = dict(uuid="",name=pathname)
 
-    # Relatively to the source a package can be in one of the following states:
-    # 1- in data but not known => add to repo
-    # 2- in data but not listed to source =>  add to source
-    # 3- listed but not in data => remove
-    # 4- both => need check
-    indataset = set(indata.keys())
-    allpacks = set(acfg.meta_list_paks())
-    unknownpacks = allpacks-indataset
-    # Case 1
-    for u in unknownpacks:
-        pass #package_add(acfg,indata[u])
 
-    print "Need to deal with cases 2..4"
-    for u in (indataset-unknownpacks):
-        pass
+    source_paks_set = set(source_paks.keys())
+    meta_paks_set = set(cfg.meta_list_paks())
+    only_insource,common,only_inmeta = splitsets3(source_paks_set,meta_paks_set)
+        
+    tt = cfg.meta_source_path(s.uuid)
+    q = yaml.load(open(tt,"rb"))
+    meta_source_paks_set = set(q["paks"])
 
-    for x in indata:
-        pass
-    #    sources = acfg.meta_pak_sources_list(x,load=True)
-    #    if not s.uuid in sources:
-    #        print "need to add",x,"to",s.uuid
+    known_but_missing,common,known_but_removed = splitsets3(common,meta_source_paks_set)
+
+    # Case 1: package unknown to meta => add to repo and to source
+    for u in only_insource:
+        logging.warn("unknown to meta: %s" % u)
+        package_add(cfg,u,now)
+
+    # Case 2: (source.paks & meta.paks)-meta.source.paks => need to add
+    for u in known_but_missing:
+        logging.warn("known but missing %s" % u)
+        tp = cfg.meta_pak_source_path(u,s.uuid)
+        sp = SourcePak()
+        sp.create(cfg.uuid,u,now)
+        yaml.dump(sp.todict(),openmkdir(tp))
+        cfg.git_add(tp)
+
+    # Case 3: meta.source.paks-source.paks => removed => AUTO
+    for u in known_but_removed:
+        logging.warn("known_but_removed %s" % u)
+        cfg.git_rm(cfg.meta_pak_source_path(u,s.uuid))
+
+    # Case 4: the remaining in source.paks => verify
+    for u in common:
+        logging.warn("common to be verified, update %s" % u)
+        fp = cfg.meta_pak_source_path(u,s.uuid)
+        sp = SourcePak()
+        tt = open(fp,"rb")
+        sp.fromdict(yaml.load(tt))
+        tt.close()
+        sp.lasttime = now
+        yaml.dump(sp.todict(),openmkdir(fp))
+        cfg.git_add(fp)
+
+    # Source Entry 
+    tt = cfg.meta_source_path(s.uuid)
+    yaml.dump(dict(paks=list(source_paks_set),lasttime=now),openmkdir(tt))
+    cfg.git_add(tt)
+
 def process_source(args,cfg,ss):
     if args.subparser2_name == "list":
         # list known sources as of meta
@@ -300,7 +374,7 @@ def process_source(args,cfg,ss):
             if s.name != args.name:
                 s.name = args.name
                 _update_one_source_dict(cfg,s.uuid,s.todict())
-                cfg.push()
+                cfg.git_push()
     elif args.subparser2_name == "show":
         # for given source show details
         s = cfg.solvesource(ss,args.name)
@@ -338,9 +412,9 @@ def process_source(args,cfg,ss):
             print "unknown source",args.name
         # verify uuid
         elif s.uuid != cfg.uuid:
-            acfg = Config(s.path)
+            acfg = Config(cfg.meta,s.path)
             if not acfg.solveuuid():
-                print "missing source",acfg.meta
+                print "missing source",acfg.data,"for",s.path,s.uuid,s.name
                 return
         else:
             acfg = cfg
@@ -350,9 +424,18 @@ def process_pack(args,cfg,ss):
     if args.subparser2_name == "list":
         print "\n".join(cfg.meta_list_paks())
     elif args.subparser2_name == "add":
-        package_add(cfg,args.name)
-    elif args.subparser2_name == "sources":
+        now = datetime.datetime.now().isoformat()
+        package_add(cfg,args.name,now)
+    elif args.subparser2_name == "sources" or args.subparser2_name == "where":
         print "\n".join(cfg.meta_pak_sources_list(args.name,load=False))
+    elif args.subparser2_name == "path":
+        source_uuids = cfg.meta_pak_sources_list(args.name)
+        for uuid in source_uuids:            
+            s = ss.get(uuid)
+            if s and os.path.isdir(s.path):
+                print os.path.join(s.path,args.name)                
+                return
+        return "/dev/null"
     
 def main():
     argparser = argparse.ArgumentParser(prog="picpak my backup management")  
@@ -389,8 +472,12 @@ def main():
     parser_pack_list = subparsers_pack.add_parser('list', help='adds')
     parser_pack_add = subparsers_pack.add_parser('add', help='adds')
     parser_pack_sources = subparsers_pack.add_parser('sources', help='list pak sources')
+    parser_pack_where = subparsers_pack.add_parser('where', help='list pak where')
+    parser_pack_path = subparsers_pack.add_parser('path', help='return available local path')
     parser_pack_add.add_argument("name")
     parser_pack_sources.add_argument("name")
+    parser_pack_where.add_argument("name")
+    parser_pack_path.add_argument("name")
 
     # Go!
     args = argparser.parse_args()
@@ -422,12 +509,12 @@ def main():
             os.makedirs(cfg.meta_paks_path())
             os.system("cd %s; git init" % cfg.meta)
             os.system("cd %s; git remote add origin %s" % (cfg.meta,cfg.remote))
-            cfg.pull()
+            cfg.git_pull()
             if not args.metaonly:
                 print "adding data folder",cfg.data
                 os.makedirs(cfg.data)
                 addsource(cfg,cfg.data,uuid.uuid4(),args.name)
-                cfg.push()
+                cfg.git_push()
         else:
             print "already existing",args.path
     elif args.subparser_name == "source":
@@ -435,8 +522,10 @@ def main():
     elif args.subparser_name == "pack":
         process_pack(args,cfg,ss)
     elif args.subparser_name == "sync":
-        cfg.pull()
-        cfg.push()
+        # eventually even: git clean -f
+        cfg.git_reset()
+        cfg.git_pull()
+        cfg.git_push()
         # then check for attached sources
         ss = cfg.loadsources()
         for s in ss.values():
@@ -451,8 +540,9 @@ def main():
                 continue
             # then verify the content
             verify_source(acfg,s)
+        cfg.git_commit("sync")
         # push changes
-        cfg.push()
+        cfg.git_push()
 
 
 if __name__ == '__main__':
