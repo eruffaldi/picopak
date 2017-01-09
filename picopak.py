@@ -36,7 +36,12 @@ import uuid
 import subprocess
 from os.path import expanduser
 import coloredlogs, logging
+#default: %(asctime)s %(hostname)s %(name)s[%(process)d] %(levelname)s %(message)s
+os.environ["COLOREDLOGS_LOG_FORMAT"]='%(asctime)s %(name)s %(message)s'
 coloredlogs.install()
+logger = logging
+
+
 # TODO crossplatform
 # TODO given path extract volume then label+uuid+diskformat
 #
@@ -198,18 +203,18 @@ class SourcePak:
         self.uuid = uuid
         self.pak = pak
         self.firsttime = time
-        self.lasttime = time
+        #self.lasttime = time
     def fromdict(self,d):
         self.content.update(d)
         self.uuid = d["uuid"]
         self.pak = d["pak"]
         self.firsttime = d["firsttime"]
-        self.lasttime = d["lasttime"]
+        #self.lasttime = d["lasttime"]
     def todict(self):
         self.content["uuid"] = self.uuid
         self.content["pak"] = self.pak
         self.content["firsttime"] = self.firsttime
-        self.content["lasttime"] = self.lasttime
+        #self.content["lasttime"] = self.lasttime
         return self.content
 
 class Source:
@@ -270,7 +275,7 @@ def package_add(cfg,packname,now):
 
     psf = cfg.meta_pak_source_path(packname,cfg.uuid)
     yaml.dump(sp.todict(),openmkdir(psf))
-    cfg.git_add(pmetadir_sig)
+    cfg.git_add(psf)
     cfg.git_commit("added source " + cfg.uuid + " to package " + packname)
 
 def _update_one_source_dict(cfg,uuid,su,msg="update source"):
@@ -302,7 +307,7 @@ def splitsets3(A,B):
 
 
 def verify_source(cfg,s):
-    logging.info("source verification %s with repo %s uuid %s" % (cfg.data,cfg.meta,s.uuid))
+    logger.info("source verification %s with repo %s uuid %s" % (cfg.data,cfg.meta,s.uuid))
     now = datetime.datetime.now().isoformat()
     
     # scan folders for new pakcages
@@ -328,12 +333,12 @@ def verify_source(cfg,s):
 
     # Case 1: package unknown to meta => add to repo and to source
     for u in only_insource:
-        logging.warn("unknown to meta: %s" % u)
+        logger.warn("unknown to meta: %s" % u)
         package_add(cfg,u,now)
 
     # Case 2: (source.paks & meta.paks)-meta.source.paks => need to add
     for u in known_but_missing:
-        logging.warn("known but missing %s" % u)
+        logger.warn("known but missing %s" % u)
         tp = cfg.meta_pak_source_path(u,s.uuid)
         sp = SourcePak()
         sp.create(cfg.uuid,u,now)
@@ -342,20 +347,23 @@ def verify_source(cfg,s):
 
     # Case 3: meta.source.paks-source.paks => removed => AUTO
     for u in known_but_removed:
-        logging.warn("known_but_removed %s" % u)
+        logger.warn("known_but_removed %s" % u)
         cfg.git_rm(cfg.meta_pak_source_path(u,s.uuid))
 
     # Case 4: the remaining in source.paks => verify
     for u in common:
-        logging.warn("common to be verified, update %s" % u)
+        logger.warn("common to be verified, update %s" % u)
         fp = cfg.meta_pak_source_path(u,s.uuid)
         sp = SourcePak()
-        tt = open(fp,"rb")
-        sp.fromdict(yaml.load(tt))
-        tt.close()
-        sp.lasttime = now
-        yaml.dump(sp.todict(),openmkdir(fp))
-        cfg.git_add(fp)
+        if os.path.isfile(fp):
+            tt = open(fp,"rb")
+            sp.fromdict(yaml.load(tt))
+            tt.close()
+        else:
+            print "missing",fp
+            #sp.lasttime = now
+            yaml.dump(sp.todict(),openmkdir(fp))
+            cfg.git_add(fp)
 
     # Source Entry 
     tt = cfg.meta_source_path(s.uuid)
