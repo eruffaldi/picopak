@@ -385,7 +385,8 @@ def verify_source(cfg,s,args):
     #q = yaml.load(open(tt,"rb"))
     meta_source_paks_set = set(su.paks) #q["paks"])
 
-    readonly = su.locked
+    # readonly behavior due to Locking or due to asked sync 
+    readonly = su.locked or args.readonly
 
     known_but_missing,common,known_but_removed = splitsets3(common,meta_source_paks_set)
 
@@ -395,16 +396,16 @@ def verify_source(cfg,s,args):
     for u in only_insource:
         changed = True
         if not readonly:
-            logger.warn("unknown to meta: %s" % u)
+            logger.warn("\tunknown to meta: %s" % u)
             package_add(cfg,u,now)
         else:
-            logger.error("source changed: unknown to meta %s" % u)
+            logger.error("\tsource changed: unknown to meta %s" % u)
 
     # Case 2: (source.paks & meta.paks)-meta.source.paks => need to add
     for pak in known_but_missing:
-        logger.info("known but missing %s scanning" % pak)
         changed = True
         if not readonly:
+            logger.info("\tknown but missing - scanning: %s " % pak)
             tp = cfg.meta_pak_source_path(pak,s.uuid)
             sp = SourcePak()
             sp.create(cfg.uuid,pak,now)
@@ -413,21 +414,21 @@ def verify_source(cfg,s,args):
             yaml.dump(sp.todict(),openmkdir(tp))
             cfg.git_add(tp)
         else:
-            logger.error("known but missing %s scanning" % pak)
+            logger.error("\tsource changed: known but missing %s" % pak)
 
 
     # Case 3: meta.source.paks-source.paks => removed => AUTO
     for u in known_but_removed:
         changed = True
         if not readonly:
-            logger.warn("known_but_removed %s" % u)
+            logger.warn("\tknown but removed %s" % u)
             cfg.git_rm(cfg.meta_pak_source_path(u,s.uuid))
         else:
-            logger.error("known_but_removed %s" % u)
+            logger.error("\tsource changed: known but removed %s" % u)
 
     # Case 4: the remaining in source.paks => verify
     for pak in common:
-        logger.info("common to be verified, update %s, content scanning" % pak)
+        logger.info("\tpack verification, content scanning: %s" % pak)
         fp = cfg.meta_pak_source_path(pak,s.uuid)
         sp = SourcePak()
         pp = cfg.source_pak_path(pak)
@@ -440,34 +441,43 @@ def verify_source(cfg,s,args):
                 tt.close()
                 if sp.content.get("sha256","") != sig:
                     if not readonly:
-                        logger.info("content changed %s as %s" % (pp,sig))
+                        logger.info("\tcontent changed %s as %s" % (pp,sig))
                         sp.content["sha256"] = sig
                         yaml.dump(sp.todict(),openmkdir(fp))
                         cfg.git_add(fp)                
                     else:
-                        logger.error("content changed %s as %s" % (pp,sig))
+                        logger.error("\tsource changed: content changed %s as %s" % (pp,sig))
                 else:
                     changed = False
         elif not readonly:
-            logger.error("missing pak.source file %s" % fp)
+            logger.error("\tsource changed: missing pak.source file %s" % fp)
         else:
-            logger.warn("missing pak.source file %s" % fp)
+            logger.warn("\tmissing pak.source file %s" % fp)
             sig = pathsignature(pp)
             sp.create(s.uuid,pak,time)
             sp.content["sha256"] = sig
             yaml.dump(sp.todict(),openmkdir(fp))
             cfg.git_add(fp)
 
-    if not changed or not readonly:
-        # write SourceState update
-        su.paks = list(source_paks_set)
-        su.lasttime = now
-        su.write()
-    elif changed and readonly:
-        logger.error("source changed but locked, something is wrong")
-
-    #tt = cfg.meta_source_path(s.uuid)
-    #yaml.dump(dict(paks=,lasttime=now,locked=False),openmkdir(tt))
+    # argument readonly mens no writes at all
+    if not args.readonly:
+        if changed:
+            if su.locked:
+                # writes down verification
+                # MAYBE write down failure
+                # NOTE no packs changes
+                logger.error("source changed but locked, verify your source")
+                su.lasttime = now
+                su.write()
+            else:
+                # full write
+                su.paks = list(source_paks_set)
+                su.lasttime = now
+                su.write()
+        else:
+            # only the timestamp
+            su.lasttime = now
+            su.write()
 
 def process_source(args,cfg,ss):
     if args.subparser2_name == "list":
@@ -587,37 +597,52 @@ def main():
     # Sync Command
     parser_sync = subparsers.add_parser('sync', help = "source help")
     parser_sync.add_argument("--verifynew",help="only verify new",action="store_true")
+    parser_sync.add_argument("--read-only",dest="readonly",help="only verify new",action="store_true")
+    parser_sync.add_argument("-r",dest="readonly",help="only verify new",action="store_true")
 
     # Source Commands
     parser_source = subparsers.add_parser('source', help = "source help")
     subparsers_source = parser_source.add_subparsers(help="sub-sub-command help",dest='subparser2_name')
+    
     parser_source_add = subparsers_source.add_parser('add', help='adds')
-    parser_source_list = subparsers_source.add_parser('list', help='list')
-    parser_source_rename = subparsers_source.add_parser('rename', help='rename')
-    parser_source_show = subparsers_source.add_parser('show', help='show content')
-    parser_source_verify = subparsers_source.add_parser('verify', help='content')
-    parser_source_lock = subparsers_source.add_parser('lock', help='lock source')
-    parser_source_unlock = subparsers_source.add_parser('unlock', help='unlock source')
-
     parser_source_add.add_argument("path")
     parser_source_add.add_argument("name")
+
+    parser_source_list = subparsers_source.add_parser('list', help='list')
+
+    parser_source_rename = subparsers_source.add_parser('rename', help='rename')
     parser_source_rename.add_argument("uuid")
     parser_source_rename.add_argument("name")
-    parser_source_verify.add_argument("name",default="this")
+
+    parser_source_show = subparsers_source.add_parser('show', help='show content')
     parser_source_show.add_argument("name")
+    
+    parser_source_verify = subparsers_source.add_parser('verify', help='content')
+    parser_source_verify.add_argument("name",default="this")
+    parser_source_verify.add_argument("--read-only",dest="readonly",help="only verify new",action="store_true")
+    parser_source_verify.add_argument("-r",dest="readonly",help="only verify new",action="store_true")
+
+    parser_source_lock = subparsers_source.add_parser('lock', help='lock source')
     parser_source_lock.add_argument("name")
+
+    parser_source_unlock = subparsers_source.add_parser('unlock', help='unlock source')
     parser_source_unlock.add_argument("name")
+
     # Pack Commands
     parser_pack = subparsers.add_parser('pack', help = "pack help")
     subparsers_pack = parser_pack.add_subparsers(help="sub-sub-command help",dest='subparser2_name')
     parser_pack_list = subparsers_pack.add_parser('list', help='adds')
+
     parser_pack_add = subparsers_pack.add_parser('add', help='adds')
-    parser_pack_sources = subparsers_pack.add_parser('sources', help='list pak sources')
-    parser_pack_where = subparsers_pack.add_parser('where', help='list pak where')
-    parser_pack_path = subparsers_pack.add_parser('path', help='return available local path')
     parser_pack_add.add_argument("name")
+
+    parser_pack_sources = subparsers_pack.add_parser('sources', help='list pak sources')
     parser_pack_sources.add_argument("name")
+
+    parser_pack_where = subparsers_pack.add_parser('where', help='list pak where')
     parser_pack_where.add_argument("name")
+
+    parser_pack_path = subparsers_pack.add_parser('path', help='return available local path')
     parser_pack_path.add_argument("name")
 
     # Go!
@@ -671,13 +696,13 @@ def main():
         ss = cfg.loadsources()
         for s in ss.values():
             if not os.path.isdir(s.path):
-                logging.info("source %s %s not available" % (s.uuid,s.path))
+                logging.warn("source %s %s not available" % (s.uuid,s.path))
                 continue                
             # verify presence of uuid
             acfg = Config(cfg.meta,s.path)
             u = acfg.solveuuid()
             if u != s.uuid:
-                logging.info("%s %s not matching uuid %s " % (s.uuid,s.path,u))
+                logging.error("%s %s not matching uuid %s " % (s.uuid,s.path,u))
                 continue
             # then verify the content
             verify_source(acfg,s,args)
