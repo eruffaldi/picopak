@@ -129,12 +129,6 @@ class Config:
     def meta_source_path(self,source):
         """details about source in metadata"""
         return os.path.join(self.meta,"sources",source + ".yaml")
-    def meta_source_load(self,source):
-        fp = self.meta_source_path(source)
-        if not os.path.isfile(fp):
-            return dict()
-        else:
-            return yaml.load(open(fp,"rb"))
     def meta_pak_source_path(self,name,source_uuid):
         """source in pack"""
         return os.path.join(self.meta_pak_sources_path(name),source_uuid + ".yaml")
@@ -205,14 +199,14 @@ class Config:
 
     def git_add(self,files):
         """Add file or files to repo"""
-        print "git_add ",files," to ",self.meta
+        #print "git_add ",files," to ",self.meta
         if type(files) is str:
             return os.system("cd %s; git add %s" % (self.meta,files)) 
         else:
             return os.system("cd %s; git add %s" % (self.meta," ".join(files))) 
     def git_commit(self,msg="auto"):
         """Commit to repo"""
-        print "committing to ",self.meta
+        #print "committing to ",self.meta
         return os.system("cd %s; git commit -am \"%s\"" % (self.meta,msg))      
     def git_pull(self):
         """Pull from repo"""
@@ -263,6 +257,35 @@ class Source:
         self.content.update(dict(name=self.name,path=self.path,label=self.label,firsttime=self.firsttime))
         return self.content
     
+class SourceState:
+    def __init__(self):
+        pass
+    @staticmethod
+    def create(uuid,cfg):
+        self = SourceState()
+        self.uuid = uuid
+        self.cfg = cfg
+        self.paks = []
+        self.lasttime = ""
+        self.locked = False
+        return self
+    @staticmethod
+    def load(name,cfg):
+        self = SourceState.create(name,cfg)
+        tt = cfg.meta_source_path(self.uuid)
+        if os.path.isfile(tt):
+            q = yaml.load(open(tt,"rb"))
+            self.lasttime = q.get("lasttime","")
+            self.paks = q["paks"]
+            self.locked = q.get("locked",False)
+        return self
+
+    #list(source_paks_set)
+    def write(self):
+        tt = self.cfg.meta_source_path(self.uuid)
+        yaml.dump(dict(paks=self.paks,lasttime=self.lasttime,locked=self.locked),openmkdir(tt))
+        self.cfg.git_add(tt)
+
 def openmkdir(fp):
     q = os.path.split(fp)[0]
     if not os.path.isdir(q):
@@ -277,19 +300,19 @@ def package_add(cfg,packname,now):
     pdatadir_sig = os.path.join(pdatadir,".picopak")
     
     if os.path.isdir(pmetadir):
-        print "package with given name already existent:",pmetadir
+        logging.error("package with given name already existent: "+pmetadir)
         return              
     if not os.path.isdir(pdatadir):
-        print "missing data folder",pdatadir
+        logging.error("missing data folder " + pdatadir)
         return
     importing = os.path.isfile(pdatadir_sig)
     if importing:
         puuid = open(pdatadir_sig,"r").read().strip()
-        print "already existing .picopack, importing into listing",puuid
+        logging.error("already existing .picopack, importing into listing "+puuid)
     else:
         puuid = str(uuid.uuid4())
         open(pdatadir_sig,"wb").write(puuid)
-        print "created package with name",puuid
+        logging.error("created package with name " + puuid)
 
     # create package folder
     os.makedirs(pmetadir_sources)
@@ -325,7 +348,7 @@ def addsource(cfg,path,uuid,name):
     volname,voluuid = get_volume_name_uuid(path)
 
     if not os.path.isfile(cfg.source_marker_path()):
-        print "making source file",cfg.source_marker_path()
+        logging.info("making source file " + cfg.source_marker_path())
         open(cfg.source_marker_path(),"wb").write(uuid)    
     su = dict(name=name,path=path,volume_uuid=voluuid,volume_name=volname)
     _update_one_source_dict(cfg,uuid,su,"added source " + uuid +" to " + path)
@@ -356,39 +379,59 @@ def verify_source(cfg,s,args):
     meta_paks_set = set(cfg.meta_list_paks())
     only_insource,common,only_inmeta = splitsets3(source_paks_set,meta_paks_set)
         
-    tt = cfg.meta_source_path(s.uuid)
-    q = yaml.load(open(tt,"rb"))
-    meta_source_paks_set = set(q["paks"])
+    # Load Source 
+    su = SourceState.load(s.uuid,cfg)
+    #tt = cfg.meta_source_path(s.uuid)
+    #q = yaml.load(open(tt,"rb"))
+    meta_source_paks_set = set(su.paks) #q["paks"])
+
+    readonly = su.locked
 
     known_but_missing,common,known_but_removed = splitsets3(common,meta_source_paks_set)
 
+    changed = False
+
     # Case 1: package unknown to meta => add to repo and to source
     for u in only_insource:
-        logger.warn("unknown to meta: %s" % u)
-        package_add(cfg,u,now)
+        changed = True
+        if not readonly:
+            logger.warn("unknown to meta: %s" % u)
+            package_add(cfg,u,now)
+        else:
+            logger.error("source changed: unknown to meta %s" % u)
 
     # Case 2: (source.paks & meta.paks)-meta.source.paks => need to add
     for pak in known_but_missing:
-        logger.warn("known but missing %s scanning" % pak)
-        tp = cfg.meta_pak_source_path(pak,s.uuid)
-        sp = SourcePak()
-        sp.create(cfg.uuid,pak,now)
-        sig = pathsignature(cfg.source_pak_path(pak))
-        sp.content["sha256"] = sig        
-        yaml.dump(sp.todict(),openmkdir(tp))
-        cfg.git_add(tp)
+        logger.info("known but missing %s scanning" % pak)
+        changed = True
+        if not readonly:
+            tp = cfg.meta_pak_source_path(pak,s.uuid)
+            sp = SourcePak()
+            sp.create(cfg.uuid,pak,now)
+            sig = pathsignature(cfg.source_pak_path(pak))
+            sp.content["sha256"] = sig        
+            yaml.dump(sp.todict(),openmkdir(tp))
+            cfg.git_add(tp)
+        else:
+            logger.error("known but missing %s scanning" % pak)
+
 
     # Case 3: meta.source.paks-source.paks => removed => AUTO
     for u in known_but_removed:
-        logger.warn("known_but_removed %s" % u)
-        cfg.git_rm(cfg.meta_pak_source_path(u,s.uuid))
+        changed = True
+        if not readonly:
+            logger.warn("known_but_removed %s" % u)
+            cfg.git_rm(cfg.meta_pak_source_path(u,s.uuid))
+        else:
+            logger.error("known_but_removed %s" % u)
 
     # Case 4: the remaining in source.paks => verify
     for pak in common:
-        logger.warn("common to be verified, update %s, content scanning" % pak)
+        logger.info("common to be verified, update %s, content scanning" % pak)
         fp = cfg.meta_pak_source_path(pak,s.uuid)
         sp = SourcePak()
         pp = cfg.source_pak_path(pak)
+        changed = True
         if os.path.isfile(fp):
             if not args.verifynew:
                 sig = pathsignature(pp)
@@ -396,10 +439,17 @@ def verify_source(cfg,s,args):
                 sp.fromdict(yaml.load(tt))
                 tt.close()
                 if sp.content.get("sha256","") != sig:
-                    logger.info("content changed %s as %s" % (pp,sig))
-                    sp.content["sha256"] = sig
-                    yaml.dump(sp.todict(),openmkdir(fp))
-                    cfg.git_add(fp)                
+                    if not readonly:
+                        logger.info("content changed %s as %s" % (pp,sig))
+                        sp.content["sha256"] = sig
+                        yaml.dump(sp.todict(),openmkdir(fp))
+                        cfg.git_add(fp)                
+                    else:
+                        logger.error("content changed %s as %s" % (pp,sig))
+                else:
+                    changed = False
+        elif not readonly:
+            logger.error("missing pak.source file %s" % fp)
         else:
             logger.warn("missing pak.source file %s" % fp)
             sig = pathsignature(pp)
@@ -408,10 +458,16 @@ def verify_source(cfg,s,args):
             yaml.dump(sp.todict(),openmkdir(fp))
             cfg.git_add(fp)
 
-    # Source Entry update update
-    tt = cfg.meta_source_path(s.uuid)
-    yaml.dump(dict(paks=list(source_paks_set),lasttime=now),openmkdir(tt))
-    cfg.git_add(tt)
+    if not changed or not readonly:
+        # write SourceState update
+        su.paks = list(source_paks_set)
+        su.lasttime = now
+        su.write()
+    elif changed and readonly:
+        logger.error("source changed but locked, something is wrong")
+
+    #tt = cfg.meta_source_path(s.uuid)
+    #yaml.dump(dict(paks=,lasttime=now,locked=False),openmkdir(tt))
 
 def process_source(args,cfg,ss):
     if args.subparser2_name == "list":
@@ -421,20 +477,35 @@ def process_source(args,cfg,ss):
     elif args.subparser2_name == "rename":
         s = cfg.solvesource(ss,args.uuid)
         if s is None:
-            print "unknown source",args.uuid
+            logging.error("unknown source " + args.uuid)
         else:
             if s.name != args.name:
                 s.name = args.name
                 _update_one_source_dict(cfg,s.uuid,s.todict())
                 cfg.git_push()
+    elif args.subparser2_name == "lock" or args.subparser2_name == "unlock":
+        s = cfg.solvesource(ss,args.name)
+        if s is None:
+            logging.error("unknown source " + args.name)
+        else:
+            su = SourceState.load(s.uuid,cfg)
+            n = args.subparser2_name == "lock"
+            if n != su.locked:
+                su.locked = n
+                su.write()
+                cfg.git_commit("committing locking op")
+                cfg.git_pull()
+                cfg.git_push()
     elif args.subparser2_name == "show":
         # for given source show details
         s = cfg.solvesource(ss,args.name)
         if s is None:
-            print "unknown source",args.name
+            logging.error("unknown source " + args.name)
         else:
-            so = cfg.meta_source_load(s.uuid)
-            print so
+            su = SourceState.load(s.uuid,cfg)
+            print "\n".join(["uuid: %s" % s.uuid,"name: %s" %s.name,"lasttime: %s"%su.lasttime,"locked: %s"% su.locked])
+            print "paks:"
+            print "\n".join(["\t%s" % x for x in su.paks])
     elif args.subparser2_name == "add":
         # args.path EXIST
         # args.path CONTAINS source.yaml
@@ -456,7 +527,7 @@ def process_source(args,cfg,ss):
                 print "adding unknown source",cfg.data,"as",cfg.uuid
                 addsource(acfg,acfg.data,acfg.uuid,args.name)
     elif args.subparser2_name == "verify":
-        print "UNCOMPLETED - make multiple sources"
+        logging.warn("UNCOMPLETED - make multiple sources")
         # sourcename/id => source object
         # verify objects
         s = cfg.solvesource(ss,args.name)
@@ -474,11 +545,8 @@ def process_source(args,cfg,ss):
 
 def load_sources_lasttime(cfg,ss):
     for s in ss.values():
-        tt = cfg.meta_source_path(s.uuid)
-        if os.path.isfile(tt):
-            s.lasttime = yaml.load(open(tt,"rb")).get("lasttime","<unknown>")
-        else:
-            s.lasttime = "<unknown>"
+        su = SourceState.load(s.uuid,cfg)
+        s.lasttime = su.lasttime
 def process_pack(args,cfg,ss):
     if args.subparser2_name == "list":
         print "\n".join(cfg.meta_list_paks())
@@ -528,6 +596,8 @@ def main():
     parser_source_rename = subparsers_source.add_parser('rename', help='rename')
     parser_source_show = subparsers_source.add_parser('show', help='show content')
     parser_source_verify = subparsers_source.add_parser('verify', help='content')
+    parser_source_lock = subparsers_source.add_parser('lock', help='lock source')
+    parser_source_unlock = subparsers_source.add_parser('unlock', help='unlock source')
 
     parser_source_add.add_argument("path")
     parser_source_add.add_argument("name")
@@ -535,6 +605,8 @@ def main():
     parser_source_rename.add_argument("name")
     parser_source_verify.add_argument("name",default="this")
     parser_source_show.add_argument("name")
+    parser_source_lock.add_argument("name")
+    parser_source_unlock.add_argument("name")
     # Pack Commands
     parser_pack = subparsers.add_parser('pack', help = "pack help")
     subparsers_pack = parser_pack.add_subparsers(help="sub-sub-command help",dest='subparser2_name')
@@ -557,35 +629,35 @@ def main():
         ss = cfg.loadsources()
         if False: # not needed
             if not cfg.solveuuid():
-                print "missing source.yaml, use init or source add"
+                logging.error("missing source.yaml, use init or source add")
                 return
             if not cfg.uuid in ss:
-                print "missing this source in sources, adding"
+                logging.error("missing this source in sources, adding")
                 addsource(cfg,args.data,cfg.uuid,"")
             if False:
                 cfg.uuid = str(uuid.uuid4())
                 addsource(cfg,cfg.data,cfg.uuid,"")
                 open(cfg.source_marker_path(),"wb").write(cfg.uuid)
                 if ss is None:
-                    print "missing sources, not valid folder"
+                    logging.error("missing sources, not valid folder")
                     return
 
     if args.subparser_name == "init":
         if not os.path.isdir(args.path):
             cfg = Config(os.path.join(args.path,"meta"),os.path.join(args.path,"data"))
-            print "initing",args.path
+            logging.info("initing" + args.path)
             os.makedirs(cfg.meta)
             os.makedirs(cfg.meta_paks_path())
             os.system("cd %s; git init" % cfg.meta)
             os.system("cd %s; git remote add origin %s" % (cfg.meta,cfg.remote))
             cfg.git_pull()
             if not args.metaonly:
-                print "adding data folder",cfg.data
+                logging.info("adding data folder " + cfg.data)
                 os.makedirs(cfg.data)
                 addsource(cfg,cfg.data,uuid.uuid4(),args.name)
                 cfg.git_push()
         else:
-            print "already existing",args.path
+            logging.info("already existing " + args.path)
     elif args.subparser_name == "source":
         process_source(args,cfg,ss)
     elif args.subparser_name == "pack":
@@ -599,13 +671,13 @@ def main():
         ss = cfg.loadsources()
         for s in ss.values():
             if not os.path.isdir(s.path):
-                print "source",s.uuid,s.path,"not available"
+                logging.info("source %s %s not available" % (s.uuid,s.path))
                 continue                
             # verify presence of uuid
             acfg = Config(cfg.meta,s.path)
             u = acfg.solveuuid()
             if u != s.uuid:
-                print s.uuid,s.path,"not matching uuid",u
+                logging.info("%s %s not matching uuid %s " % (s.uuid,s.path,u))
                 continue
             # then verify the content
             verify_source(acfg,s,args)
