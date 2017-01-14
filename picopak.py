@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 #
 # TODO: remove source or package
-# TODO: packages with not enough recent sources
-# TODO: some caching
+# TODO: list packages with not enough recent sources
 # TODO: verify packname-uuid correspondence
-#
+# TODO: add size of package and last modified time (while hash is already provided)
+# TODO: make a source read-only and react with ERROR if it changed
 #
 # Goal: package like backup management, not full
 # 
@@ -41,12 +41,31 @@ os.environ["COLOREDLOGS_LOG_FORMAT"]='%(asctime)s %(name)s %(message)s'
 coloredlogs.install()
 logger = logging
 
+def pathlast(path):
+    """Returns last modified file scanning the whole path and calling stat"""
+    FNULL = open(os.devnull, 'w')
+    r = subprocess.Popen("find . -type f -print0 | xargs -0 stat -f \"%m %N\" | sort -nr | head -n 1",cwd=path,stderr=FNULL,stdout=subprocess.PIPE,shell=True)
+    d,n = r.stdout.readline().strip().split(" ",1)
+    r.kill()
+    FNULL.close()
+    return (int(d),n)
+
+
+def pathsize(path):
+    # path must exist
+    r = subprocess.Popen("du -d 0 \"%s\"" % path,stdout=subprocess.PIPE,shell=True,env=dict(BLOCKSIZE="1024"))
+    return r.stdout.readline().split("\t")[0].strip()
 
 def pathsignature(path,mode="256"):
+    # path must exist
+    # spaces in files are ok
+    # empty string: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    #
+    # OPTIONAL: return the list of hashes instead of making a grand-hash
+    # Note: metadata are not used in hash, BUT filename is used
     env = dict(XPATH=".",SUMCMD="shasum -a %s" % mode)
-    r = subprocess.Popen("find $XPATH -type f -print0 | sort -z | xargs -0 ${SUMCMD} | ${SUMCMD} | awk '{print $1}'",cwd=path,stdout=subprocess.PIPE,shell=True)
-    line = r.stdout.readline()
-    print line
+    r = subprocess.Popen("find \"$XPATH\" -type f -print0 | sort -z | xargs -0 ${SUMCMD} | ${SUMCMD} | awk '{print $1}'",cwd=path,stdout=subprocess.PIPE,shell=True,env=env)
+    return r.stdout.readline().strip()
 
 
 # TODO crossplatform
@@ -231,14 +250,17 @@ class Source:
         self.name = ""
         self.path = ""
         self.label = ""
+        self.firsttime = ""
+        # last time is in the per-source information
     def fromdict(self,x):
         self.content = x
         self.name = x["name"]
         self.path = x.get("path","")
         self.label = x.get("label","")
+        self.firsttime = x.get("firsttime","")
         return self
     def todict(self):
-        self.content.update(dict(name=self.name,path=self.path,label=self.label))
+        self.content.update(dict(name=self.name,path=self.path,label=self.label,firsttime=self.firsttime))
         return self.content
     
 def openmkdir(fp):
@@ -279,6 +301,8 @@ def package_add(cfg,packname,now):
     # then add cfg.uuid as source
     sp = SourcePak()
     sp.create(uuid=cfg.uuid,pak=packname,time=now)
+    sig = pathsignature(cfg.source_pak_path(packname))
+    sp["content"] = sig
 
     psf = cfg.meta_pak_source_path(packname,cfg.uuid)
     yaml.dump(sp.todict(),openmkdir(psf))
@@ -313,7 +337,7 @@ def splitsets3(A,B):
     return A-common,common,B-common
 
 
-def verify_source(cfg,s):
+def verify_source(cfg,s,args):
     logger.info("source verification %s with repo %s uuid %s" % (cfg.data,cfg.meta,s.uuid))
     now = datetime.datetime.now().isoformat()
     
@@ -344,11 +368,13 @@ def verify_source(cfg,s):
         package_add(cfg,u,now)
 
     # Case 2: (source.paks & meta.paks)-meta.source.paks => need to add
-    for u in known_but_missing:
-        logger.warn("known but missing %s" % u)
-        tp = cfg.meta_pak_source_path(u,s.uuid)
+    for pak in known_but_missing:
+        logger.warn("known but missing %s scanning" % pak)
+        tp = cfg.meta_pak_source_path(pak,s.uuid)
         sp = SourcePak()
-        sp.create(cfg.uuid,u,now)
+        sp.create(cfg.uuid,pak,now)
+        sig = pathsignature(cfg.source_pak_path(pak))
+        sp.content["sha256"] = sig        
         yaml.dump(sp.todict(),openmkdir(tp))
         cfg.git_add(tp)
 
@@ -358,21 +384,31 @@ def verify_source(cfg,s):
         cfg.git_rm(cfg.meta_pak_source_path(u,s.uuid))
 
     # Case 4: the remaining in source.paks => verify
-    for u in common:
-        logger.warn("common to be verified, update %s" % u)
-        fp = cfg.meta_pak_source_path(u,s.uuid)
+    for pak in common:
+        logger.warn("common to be verified, update %s, content scanning" % pak)
+        fp = cfg.meta_pak_source_path(pak,s.uuid)
         sp = SourcePak()
+        pp = cfg.source_pak_path(pak)
         if os.path.isfile(fp):
-            tt = open(fp,"rb")
-            sp.fromdict(yaml.load(tt))
-            tt.close()
+            if not args.verifynew:
+                sig = pathsignature(pp)
+                tt = open(fp,"rb")
+                sp.fromdict(yaml.load(tt))
+                tt.close()
+                if sp.content.get("sha256","") != sig:
+                    logger.info("content changed %s as %s" % (pp,sig))
+                    sp.content["sha256"] = sig
+                    yaml.dump(sp.todict(),openmkdir(fp))
+                    cfg.git_add(fp)                
         else:
-            print "missing",fp
-            #sp.lasttime = now
+            logger.warn("missing pak.source file %s" % fp)
+            sig = pathsignature(pp)
+            sp.create(s.uuid,pak,time)
+            sp.content["sha256"] = sig
             yaml.dump(sp.todict(),openmkdir(fp))
             cfg.git_add(fp)
 
-    # Source Entry 
+    # Source Entry update update
     tt = cfg.meta_source_path(s.uuid)
     yaml.dump(dict(paks=list(source_paks_set),lasttime=now),openmkdir(tt))
     cfg.git_add(tt)
@@ -380,7 +416,8 @@ def verify_source(cfg,s):
 def process_source(args,cfg,ss):
     if args.subparser2_name == "list":
         # list known sources as of meta
-        print "\n".join(["%s\t%s\t%s" % (s.name,s.uuid,s.path) for s in ss.values()])
+        load_sources_lasttime(cfg,ss)
+        print "\n".join(["%s\t%s\t%s\t%s" % (s.name,s.uuid,s.lasttime,s.path) for s in ss.values()])
     elif args.subparser2_name == "rename":
         s = cfg.solvesource(ss,args.uuid)
         if s is None:
@@ -433,16 +470,32 @@ def process_source(args,cfg,ss):
                 return
         else:
             acfg = cfg
-        verify_source(acfg,s)
+        verify_source(acfg,s,args)
 
+def load_sources_lasttime(cfg,ss):
+    for s in ss.values():
+        tt = cfg.meta_source_path(s.uuid)
+        if os.path.isfile(tt):
+            s.lasttime = yaml.load(open(tt,"rb")).get("lasttime","<unknown>")
+        else:
+            s.lasttime = "<unknown>"
 def process_pack(args,cfg,ss):
     if args.subparser2_name == "list":
         print "\n".join(cfg.meta_list_paks())
     elif args.subparser2_name == "add":
         now = datetime.datetime.now().isoformat()
         package_add(cfg,args.name,now)
-    elif args.subparser2_name == "sources" or args.subparser2_name == "where":
-        print "\n".join(cfg.meta_pak_sources_list(args.name,load=False))
+    elif args.subparser2_name == "sources" or args.subparser2_name == "where":        
+        load_sources_lasttime(cfg,ss)
+        if args.name == "all":
+            names = cfg.meta_list_paks()
+            for n in sorted(names):
+                q = cfg.meta_pak_sources_list(n,load=True)
+                print n
+                print "\n".join(["\t%s %s %s" % (uuid,ss[uuid].lasttime,info.get("sha256","")) for uuid,info in q.iteritems()])
+        else:
+            q = cfg.meta_pak_sources_list(args.name,load=True)
+            print "\n".join(["%s %s %s" % (uuid,ss[uuid].lasttime,info.get("sha256","")) for uuid,info in q.iteritems()])
     elif args.subparser2_name == "path":
         source_uuids = cfg.meta_pak_sources_list(args.name)
         for uuid in source_uuids:            
@@ -465,6 +518,7 @@ def main():
 
     # Sync Command
     parser_sync = subparsers.add_parser('sync', help = "source help")
+    parser_sync.add_argument("--verifynew",help="only verify new",action="store_true")
 
     # Source Commands
     parser_source = subparsers.add_parser('source', help = "source help")
@@ -554,7 +608,7 @@ def main():
                 print s.uuid,s.path,"not matching uuid",u
                 continue
             # then verify the content
-            verify_source(acfg,s)
+            verify_source(acfg,s,args)
         cfg.git_commit("sync")
         # push changes
         cfg.git_push()
