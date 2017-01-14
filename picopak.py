@@ -42,6 +42,13 @@ coloredlogs.install()
 logger = logging
 
 
+def pathsignature(path,mode="256"):
+    env = dict(XPATH=".",SUMCMD="shasum -a %s" % mode)
+    r = subprocess.Popen("find $XPATH -type f -print0 | sort -z | xargs -0 ${SUMCMD} | ${SUMCMD} | awk '{print $1}'",cwd=path,stdout=subprocess.PIPE,shell=True)
+    line = r.stdout.readline()
+    print line
+
+
 # TODO crossplatform
 # TODO given path extract volume then label+uuid+diskformat
 #
