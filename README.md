@@ -1,6 +1,9 @@
 # picopak
 Personal Package Based Backup with Sources, simpler than git-annex but for my needs
 
+TODO support rename of package folders <-> 
+TODO git --git-dir=.git --work-tree=.
+
 # Usage
 
 Start with:

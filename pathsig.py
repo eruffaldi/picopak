@@ -18,17 +18,19 @@ def pathsize(path):
 	r.kill()
 	return 
 
-
 def pathsignature(path,mode="256"):
-	# path must exist
-	# spaces in files are ok
-	# empty string: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-	#
-	# OPTIONAL: return the list of hashes instead of making a grand-hash
-	# Note: metadata are not used in hash, BUT filename is used
-	env = dict(SUMCMD="shasum -a %s" % mode)
-	r = subprocess.Popen("find . -type f -print0 | sort -z | xargs -0 ${SUMCMD} | ${SUMCMD} | awk '{print $1}'",cwd=path,stdout=subprocess.PIPE,shell=True,env=env)
-	return r.stdout.readline().strip()
+    # path must exist
+    # spaces in files are ok
+    # empty string: e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+    #
+    # OPTIONAL: return the list of hashes instead of making a grand-hash
+    # Note: metadata are not used in hash, BUT filename is used
+    env = dict(XPATH=".",SUMCMD="shasum -a %s" % mode)
+    ss = "find \"$XPATH\" -type f -not -name \"*.DS_Store\" -and -not -name \"._*\" -and -not -name .picopak -print0 | sort -z | tee /tmp/x%s.txt | xargs -0 ${SUMCMD} | ${SUMCMD} | awk '{print $1}'" % (path.replace("/","_"))
+    print ss
+    r = subprocess.Popen(ss,cwd=path,stdout=subprocess.PIPE,shell=True,env=env)
+    return r.stdout.readline().strip()
+
 
 if __name__ == '__main__':
 	import sys

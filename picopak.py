@@ -56,6 +56,8 @@ def pathsize(path):
     r = subprocess.Popen("du -d 0 \"%s\"" % path,stdout=subprocess.PIPE,shell=True,env=dict(BLOCKSIZE="1024"))
     return r.stdout.readline().split("\t")[0].strip()
 
+#._.DS_Store
+#.DS_Store
 def pathsignature(path,mode="256"):
     # path must exist
     # spaces in files are ok
@@ -64,7 +66,7 @@ def pathsignature(path,mode="256"):
     # OPTIONAL: return the list of hashes instead of making a grand-hash
     # Note: metadata are not used in hash, BUT filename is used
     env = dict(XPATH=".",SUMCMD="shasum -a %s" % mode)
-    r = subprocess.Popen("find \"$XPATH\" -type f -print0 | sort -z | xargs -0 ${SUMCMD} | ${SUMCMD} | awk '{print $1}'",cwd=path,stdout=subprocess.PIPE,shell=True,env=env)
+    r = subprocess.Popen("find \"$XPATH\" -type f -not -name \"*.DS_Store\" -and -not -name \"._*\" -and -not -name .picopak -print0 | sort -z | xargs -0 ${SUMCMD} | ${SUMCMD} | awk '{print $1}'",cwd=path,stdout=subprocess.PIPE,shell=True,env=env)
     return r.stdout.readline().strip()
 
 
@@ -197,6 +199,12 @@ class Config:
     def git_reset(self):
         return os.system("cd %s; git reset --hard" % (self.meta)) 
 
+    def git_rm(self,files):
+        if type(files) is str:
+            return os.system("cd %s; git rm %s" % (self.meta,files)) 
+        else:
+            return os.system("cd %s; git rm %s" % (self.meta," ".join(files))) 
+
     def git_add(self,files):
         """Add file or files to repo"""
         #print "git_add ",files," to ",self.meta
@@ -301,10 +309,10 @@ def package_add(cfg,packname,now):
     
     if os.path.isdir(pmetadir):
         logging.error("package with given name already existent: "+pmetadir)
-        return              
+        return False
     if not os.path.isdir(pdatadir):
         logging.error("missing data folder " + pdatadir)
-        return
+        return False
     importing = os.path.isfile(pdatadir_sig)
     if importing:
         puuid = open(pdatadir_sig,"r").read().strip()
@@ -325,12 +333,13 @@ def package_add(cfg,packname,now):
     sp = SourcePak()
     sp.create(uuid=cfg.uuid,pak=packname,time=now)
     sig = pathsignature(cfg.source_pak_path(packname))
-    sp["content"] = sig
+    sp.content["sha256"] = sig
 
     psf = cfg.meta_pak_source_path(packname,cfg.uuid)
     yaml.dump(sp.todict(),openmkdir(psf))
     cfg.git_add(psf)
     cfg.git_commit("added source " + cfg.uuid + " to package " + packname)
+    return True
 
 def _update_one_source_dict(cfg,uuid,su,msg="update source"):
     # add to sources.yaml
@@ -391,15 +400,16 @@ def verify_source(cfg,s,args):
     known_but_missing,common,known_but_removed = splitsets3(common,meta_source_paks_set)
 
     changed = False
+    modified = False
 
     # Case 1: package unknown to meta => add to repo and to source
     for u in only_insource:
         changed = True
         if not readonly:
             logger.warn("\tunknown to meta: %s" % u)
-            package_add(cfg,u,now)
+            modified = modified or package_add(cfg,u,now)
         else:
-            logger.error("\tsource changed: unknown to meta %s" % u)
+            logger.error("\tRDONLY source changed: unknown to meta %s" % u)
 
     # Case 2: (source.paks & meta.paks)-meta.source.paks => need to add
     for pak in known_but_missing:
@@ -413,8 +423,9 @@ def verify_source(cfg,s,args):
             sp.content["sha256"] = sig        
             yaml.dump(sp.todict(),openmkdir(tp))
             cfg.git_add(tp)
+            modified = True
         else:
-            logger.error("\tsource changed: known but missing %s" % pak)
+            logger.error("\tRDONLY source changed: known but missing %s" % pak)
 
 
     # Case 3: meta.source.paks-source.paks => removed => AUTO
@@ -423,8 +434,9 @@ def verify_source(cfg,s,args):
         if not readonly:
             logger.warn("\tknown but removed %s" % u)
             cfg.git_rm(cfg.meta_pak_source_path(u,s.uuid))
+            modified = True
         else:
-            logger.error("\tsource changed: known but removed %s" % u)
+            logger.error("\tRDONLY source changed: known but removed %s" % u)
 
     # Case 4: the remaining in source.paks => verify
     for pak in common:
@@ -444,13 +456,14 @@ def verify_source(cfg,s,args):
                         logger.info("\tcontent changed %s as %s" % (pp,sig))
                         sp.content["sha256"] = sig
                         yaml.dump(sp.todict(),openmkdir(fp))
-                        cfg.git_add(fp)                
+                        cfg.git_add(fp)  
+                        modified = True              
                     else:
                         logger.error("\tsource changed: content changed %s as %s" % (pp,sig))
                 else:
                     changed = False
         elif not readonly:
-            logger.error("\tsource changed: missing pak.source file %s" % fp)
+            logger.error("\tRDONLY source changed: missing pak.source file %s" % fp)
         else:
             logger.warn("\tmissing pak.source file %s" % fp)
             sig = pathsignature(pp)
@@ -458,6 +471,7 @@ def verify_source(cfg,s,args):
             sp.content["sha256"] = sig
             yaml.dump(sp.todict(),openmkdir(fp))
             cfg.git_add(fp)
+            modified = True              
 
     # argument readonly mens no writes at all
     if not args.readonly:
@@ -478,6 +492,8 @@ def verify_source(cfg,s,args):
             # only the timestamp
             su.lasttime = now
             su.write()
+        modified = True              
+    return modified
 
 def process_source(args,cfg,ss):
     if args.subparser2_name == "list":
@@ -542,16 +558,21 @@ def process_source(args,cfg,ss):
         # verify objects
         s = cfg.solvesource(ss,args.name)
         if s is None:
-            print "unknown source",args.name
+            logging.error("unknown source %s",args.name)
+            return
         # verify uuid
         elif s.uuid != cfg.uuid:
             acfg = Config(cfg.meta,s.path)
             if not acfg.solveuuid():
-                print "missing source",acfg.data,"for",s.path,s.uuid,s.name
+                logging.error("missing source %s for %s %s %s",acfg.data,s.path,s.uuid,s.name)
                 return
         else:
             acfg = cfg
-        verify_source(acfg,s,args)
+        modified = verify_source(acfg,s,args)
+        if modified:
+            cfg.git_commit("sync")
+            # push changes
+            cfg.git_push()
 
 def load_sources_lasttime(cfg,ss):
     for s in ss.values():
@@ -619,8 +640,9 @@ def main():
     
     parser_source_verify = subparsers_source.add_parser('verify', help='content')
     parser_source_verify.add_argument("name",default="this")
-    parser_source_verify.add_argument("--read-only",dest="readonly",help="only verify new",action="store_true")
-    parser_source_verify.add_argument("-r",dest="readonly",help="only verify new",action="store_true")
+    parser_source_verify.add_argument("--read-only",dest="readonly",help="read-only operation",action="store_true")
+    parser_source_verify.add_argument("-r",dest="readonly",help="read-only operation",action="store_true")
+    parser_source_verify.add_argument("--verifynew",help="do not scan content of known packages",action="store_true")
 
     parser_source_lock = subparsers_source.add_parser('lock', help='lock source')
     parser_source_lock.add_argument("name")
@@ -694,6 +716,7 @@ def main():
         cfg.git_push()
         # then check for attached sources
         ss = cfg.loadsources()
+        modified = False
         for s in ss.values():
             if not os.path.isdir(s.path):
                 logging.warn("source %s %s not available" % (s.uuid,s.path))
@@ -705,10 +728,11 @@ def main():
                 logging.error("%s %s not matching uuid %s " % (s.uuid,s.path,u))
                 continue
             # then verify the content
-            verify_source(acfg,s,args)
-        cfg.git_commit("sync")
-        # push changes
-        cfg.git_push()
+            modified = modified or verify_source(acfg,s,args)
+        if modified:
+            cfg.git_commit("sync")
+            # push changes
+            cfg.git_push()
 
 
 if __name__ == '__main__':
