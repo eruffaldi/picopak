@@ -5,14 +5,12 @@ Picopak is an archival software aimed at storing task/project archives and track
 Concepts:
 * repository: the location in which metatada is stored, based on git
 * package: a unit of management of picopak
-* source: a location that stores packages (e.g. external disk)
+* source: a location that stores packages (e.g. external disk, remote)
+* snapshot: a snapshot of a given package located in a given source 
+
+The key point of the system is the tracking of location of the different snapshots of a package across sources. The granularity is high (e.g. hunders of MB, or GBs) while for finer tracking other solutions do exist like git-annex. Deduplication of data in a source is not a requirement but it can be provided by a source backend.
 
 
-
-Personal Package Based Backup with Sources, simpler than git-annex but for my needs
-
-TODO support rename of package folders <-> 
-TODO git --git-dir=.git --work-tree=.
 
 # Usage
 
