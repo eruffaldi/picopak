@@ -10,9 +10,16 @@ Concepts:
 
 The key point of the system is the tracking of location of the different snapshots of a package across sources. The granularity is high (e.g. hunders of MB, or GBs) while for finer tracking other solutions do exist like git-annex. Deduplication of data in a source is not a requirement but it can be provided by a source backend.
 
+# Planning for Version 2
 
+* mountable remote content
+* JSON content instead of YAML
+* possibly alternative backend for supporting mountability (e.g. restic)
+* rename structure of commands for supporting sub parsers and verb object a-la restic CLI
 
-# Usage
+# Version 1 notes
+
+## Usage
 
 Start with:
 
@@ -26,7 +33,7 @@ Sync
 
 	picopak sync
 
-# Source Operations
+## Source Operations
 
 List known source
 
@@ -48,7 +55,7 @@ Show details about source TBD
 	- last seen
 	- packages contained
 
-# Package Operations
+## Package Operations
 
 List known packages
 
